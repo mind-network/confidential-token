@@ -12,7 +12,6 @@ coverage
 dist
 node_modules
 types
-deployments
 tmp
 
 # files
