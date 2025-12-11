@@ -17,6 +17,7 @@ describe("FHEToken", function () {
   let underlying: TestERC20;
   let token: FHEToken;
   let tokenAddress: string;
+  const EIP712_RESOURCE = "demo-payment";
 
   before(async function () {
     [owner, alice, bob] = await ethers.getSigners();
@@ -43,6 +44,12 @@ describe("FHEToken", function () {
 
     tokenAddress = await token.getAddress();
   });
+
+  async function confidentialBalanceOrZero(address: string, signer: HardhatEthersSigner) {
+    const handle = await token.confidentialBalanceOf(address);
+    if (handle === ethers.ZeroHash) return 0n;
+    return fhevm.userDecryptEuint(FhevmType.euint64, handle, tokenAddress, signer);
+  }
 
   it("initializes metadata and underlying settings", async function () {
     expect(await token.name()).to.equal("Confidential Token");
@@ -142,5 +149,72 @@ describe("FHEToken", function () {
     expect(decryptedBalance).to.equal(WRAP_AMOUNT - clearUnwrapAmount);
     expect(await underlying.balanceOf(owner.address)).to.equal(INITIAL_SUPPLY - (WRAP_AMOUNT - clearUnwrapAmount));
     expect(await underlying.balanceOf(tokenAddress)).to.equal(WRAP_AMOUNT - clearUnwrapAmount);
+  });
+
+  it("executes a confidential transfer via EIP-712 authorization relayed by another account", async function () {
+    await underlying.connect(owner).approve(tokenAddress, WRAP_AMOUNT);
+    await token.wrap(alice.address, WRAP_AMOUNT);
+
+    const aliceBalanceBefore = await confidentialBalanceOrZero(alice.address, alice);
+    const bobBalanceBefore = await confidentialBalanceOrZero(bob.address, bob);
+
+    const encryptedTransfer = await fhevm
+      .createEncryptedInput(tokenAddress, owner.address)
+      .add64(Number(TRANSFER_AMOUNT))
+      .encrypt();
+
+    const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+    const resourceHash = ethers.keccak256(ethers.toUtf8Bytes(EIP712_RESOURCE));
+    const encryptedAmountHash = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedTransfer.handles[0]]),
+    );
+
+    const payment = {
+      holder: alice.address,
+      payee: bob.address,
+      maxClearAmount: TRANSFER_AMOUNT,
+      resourceHash,
+      validAfter: BigInt(now),
+      validBefore: BigInt(now + 3600),
+      nonce: ethers.hexlify(ethers.randomBytes(32)),
+      encryptedAmountHash,
+    };
+
+    const domain = {
+      name: `${await token.name()} Confidential`,
+      version: "1",
+      chainId: (await ethers.provider.getNetwork()).chainId,
+      verifyingContract: tokenAddress,
+    };
+
+    const types = {
+      ConfidentialPayment: [
+        { name: "holder", type: "address" },
+        { name: "payee", type: "address" },
+        { name: "maxClearAmount", type: "uint256" },
+        { name: "resourceHash", type: "bytes32" },
+        { name: "validAfter", type: "uint48" },
+        { name: "validBefore", type: "uint48" },
+        { name: "nonce", type: "bytes32" },
+        { name: "encryptedAmountHash", type: "bytes32" },
+      ],
+    };
+
+    const signature = await alice.signTypedData(domain, types, payment);
+
+    await token
+      .connect(owner)
+      .confidentialTransferWithAuthorization(
+        payment,
+        encryptedTransfer.handles[0],
+        encryptedTransfer.inputProof,
+        signature,
+      );
+
+    const aliceBalanceAfter = await confidentialBalanceOrZero(alice.address, alice);
+    const bobBalanceAfter = await confidentialBalanceOrZero(bob.address, bob);
+
+    expect(aliceBalanceAfter).to.equal(aliceBalanceBefore - TRANSFER_AMOUNT);
+    expect(bobBalanceAfter).to.equal(bobBalanceBefore + TRANSFER_AMOUNT);
   });
 });

@@ -7,6 +7,7 @@ import { createInstance, SepoliaConfig } from "@zama-fhe/relayer-sdk/node";
 describe("FHEToken (Sepolia, real relayer)", function () {
   let owner: HardhatEthersSigner;
   let alice: HardhatEthersSigner;
+  let bob: HardhatEthersSigner;
   let token: FHEToken;
   let underlying: TestERC20;
   let tokenAddress: string;
@@ -96,9 +97,10 @@ describe("FHEToken (Sepolia, real relayer)", function () {
   before(async function () {
     relayerInstance = await createInstance(SepoliaConfig);
 
-    [owner, alice] = await ethers.getSigners();
+    [owner, alice, bob] = await ethers.getSigners();
     console.log(`Owner: ${owner.address}`);
     console.log(`Alice: ${alice.address}`);
+    console.log(`Bob: ${bob.address}`);
 
     try {
       const fh = await deployments.get("FHEToken");
@@ -157,6 +159,85 @@ describe("FHEToken (Sepolia, real relayer)", function () {
 
     expect(ownerBalanceAfter).to.equal(ownerBalanceBefore + WRAP_AMOUNT - TRANSFER_AMOUNT);
     expect(aliceBalanceAfter).to.equal(aliceBalanceBefore + TRANSFER_AMOUNT);
+  });
+
+  it("executes confidential transfer via EIP-712 authorization relayed by owner", async function () {
+    this.timeout(6 * 60 * 1000);
+
+    progress("Approving wrapper for underlying (EIP-712 test)...");
+    await (await underlying.connect(owner).approve(tokenAddress, WRAP_AMOUNT)).wait();
+
+    progress("Wrapping to Alice...");
+    await (await token.connect(owner).wrap(alice.address, WRAP_AMOUNT)).wait();
+
+    progress("Reading balances before...");
+    const aliceBefore = await confidentialBalanceOrZero(alice.address, alice);
+    const bobBefore = await confidentialBalanceOrZero(bob.address, bob);
+
+    progress("Creating encrypted input (owner as sender)...");
+    const encryptedTransfer = await relayerInstance
+      .createEncryptedInput(tokenAddress, owner.address)
+      .add64(Number(TRANSFER_AMOUNT))
+      .encrypt();
+
+    const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+    const resourceHash = ethers.keccak256(ethers.toUtf8Bytes("sepolia-eip712"));
+    const encryptedAmountHash = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedTransfer.handles[0]]),
+    );
+
+    const payment = {
+      holder: alice.address,
+      payee: bob.address,
+      maxClearAmount: TRANSFER_AMOUNT,
+      resourceHash,
+      validAfter: BigInt(now),
+      validBefore: BigInt(now + 3600),
+      nonce: ethers.hexlify(ethers.randomBytes(32)),
+      encryptedAmountHash,
+    };
+
+    const domain = {
+      name: `${await token.name()} Confidential`,
+      version: "1",
+      chainId: (await ethers.provider.getNetwork()).chainId,
+      verifyingContract: tokenAddress,
+    };
+
+    const types = {
+      ConfidentialPayment: [
+        { name: "holder", type: "address" },
+        { name: "payee", type: "address" },
+        { name: "maxClearAmount", type: "uint256" },
+        { name: "resourceHash", type: "bytes32" },
+        { name: "validAfter", type: "uint48" },
+        { name: "validBefore", type: "uint48" },
+        { name: "nonce", type: "bytes32" },
+        { name: "encryptedAmountHash", type: "bytes32" },
+      ],
+    };
+
+    progress("Alice signing typed data...");
+    const signature = await alice.signTypedData(domain, types, payment);
+
+    progress("Owner relays confidentialTransferWithAuthorization...");
+    await (
+      await token
+        .connect(owner)
+        .confidentialTransferWithAuthorization(
+          payment,
+          encryptedTransfer.handles[0],
+          encryptedTransfer.inputProof,
+          signature,
+        )
+    ).wait();
+
+    progress("Reading balances after...");
+    const aliceAfter = await confidentialBalanceOrZero(alice.address, alice);
+    const bobAfter = await confidentialBalanceOrZero(bob.address, bob);
+
+    expect(aliceAfter).to.equal(aliceBefore - TRANSFER_AMOUNT);
+    expect(bobAfter).to.equal(bobBefore + TRANSFER_AMOUNT);
   });
 
   it("unwraps alice balance back to underlying on Sepolia", async function () {
