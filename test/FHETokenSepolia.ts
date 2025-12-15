@@ -74,6 +74,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
   async function confidentialBalanceOrZero(address: string, signer: HardhatEthersSigner) {
     const handle = await token.confidentialBalanceOf(address);
     if (handle === ethers.ZeroHash) return 0n;
+    console.log(`Decrypting confidential balance for ${address} with handle ${handle}...`);
     return userDecryptEuint64WithRetry(handle, tokenAddress, signer);
   }
 
@@ -221,7 +222,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     const signature = await alice.signTypedData(domain, types, payment);
 
     progress("Owner relays confidentialTransferWithAuthorization...");
-    await (
+    const relayTx = await (
       await token
         .connect(owner)
         .confidentialTransferWithAuthorization(
@@ -232,12 +233,33 @@ describe("FHEToken (Sepolia, real relayer)", function () {
         )
     ).wait();
 
+    if (!relayTx) {
+      throw new Error("relay transaction did not produce a receipt");
+    }
+
+    progress("Fetching ConfidentialPaymentExecuted event...");
+    const events = await token.queryFilter(
+      token.filters.ConfidentialPaymentExecuted(alice.address, bob.address),
+      relayTx.blockNumber,
+      relayTx.blockNumber,
+    );
+    const returnedHandle = events[0]?.args?.transferredAmount as string | undefined;
+
+    if (!returnedHandle) {
+      throw new Error("ConfidentialPaymentExecuted event not found");
+    }
+
+    progress("User decrypting returned handle (receiver)...");
+    const decryptedTransfer = await userDecryptEuint64WithRetry(returnedHandle, tokenAddress, bob);
+    console.log("Decrypted transfer amount:", decryptedTransfer.toString());
+
     progress("Reading balances after...");
     const aliceAfter = await confidentialBalanceOrZero(alice.address, alice);
     const bobAfter = await confidentialBalanceOrZero(bob.address, bob);
 
     expect(aliceAfter).to.equal(aliceBefore - TRANSFER_AMOUNT);
     expect(bobAfter).to.equal(bobBefore + TRANSFER_AMOUNT);
+    expect(decryptedTransfer).to.equal(TRANSFER_AMOUNT);
   });
 
   it("unwraps alice balance back to underlying on Sepolia", async function () {
