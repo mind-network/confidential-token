@@ -7,11 +7,14 @@ import {ERC7984} from "@openzeppelin/confidential-contracts/token/ERC7984/ERC798
 import {
     ERC7984ERC20Wrapper
 } from "@openzeppelin/confidential-contracts/token/ERC7984/extensions/ERC7984ERC20Wrapper.sol";
+import {
+    ERC7984ObserverAccess
+} from "@openzeppelin/confidential-contracts/token/ERC7984/extensions/ERC7984ObserverAccess.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
-contract FHEToken is ZamaEthereumConfig, ERC7984ERC20Wrapper, EIP712 {
+contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrapper, EIP712 {
     using ECDSA for bytes32;
 
     // ====== EIP-712 Typed Data ======
@@ -149,5 +152,17 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ERC20Wrapper, EIP712 {
         transferred = _transfer(p.holder, p.payee, FHE.fromExternal(encryptedAmountInput, inputProof));
 
         emit ConfidentialPaymentExecuted(p.holder, p.payee, p.maxClearAmount, p.resourceHash, p.nonce, transferred);
+    }
+
+    function decimals() public view override(ERC7984, ERC7984ERC20Wrapper) returns (uint8) {
+        return ERC7984ERC20Wrapper.decimals();
+    }
+
+    function _update(
+        address from,
+        address to,
+        euint64 amount
+    ) internal override(ERC7984, ERC7984ObserverAccess) returns (euint64 transferred) {
+        return ERC7984ObserverAccess._update(from, to, amount);
     }
 }
