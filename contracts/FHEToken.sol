@@ -67,12 +67,7 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
         string memory symbol_,
         string memory tokenURI_,
         IERC20 underlying_
-    )
-        ERC7984(name_, symbol_, tokenURI_)
-        ERC7984ERC20Wrapper(underlying_)
-        // EIP712 name/version; keep fixed or align with ERC7984 name_ as needed
-        EIP712(string.concat(name_, " Confidential"), "1")
-    {}
+    ) ERC7984(name_, symbol_, tokenURI_) ERC7984ERC20Wrapper(underlying_) EIP712(name_, "1") {}
 
     // ====== EIP-712 hash helpers ======
 

@@ -181,7 +181,7 @@ describe("FHEToken", function () {
     };
 
     const domain = {
-      name: `${await token.name()} Confidential`,
+      name: await token.name(),
       version: "1",
       chainId: (await ethers.provider.getNetwork()).chainId,
       verifyingContract: tokenAddress,
