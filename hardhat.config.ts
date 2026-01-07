@@ -11,6 +11,7 @@ import "solidity-coverage";
 
 import "./tasks/accounts";
 import "./tasks/FHECounter";
+import "./tasks/FHEToken";
 import dotenv from "dotenv";
 dotenv.config();
 const { PRIVATE_KEY, INFURA_ID } = process.env;
@@ -59,6 +60,7 @@ const config: HardhatUserConfig = {
     sepolia: {
       accounts: PRIVATE_KEY!.split(","),
       chainId: 11155111,
+      // maxFeePerGas: "10000000000",
       url: `https://sepolia.infura.io/v3/${INFURA_API_KEY}`,
     },
   },

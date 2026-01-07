@@ -2,7 +2,7 @@ import { FhevmType } from "@fhevm/hardhat-plugin";
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import { expect } from "chai";
 import { ethers, fhevm } from "hardhat";
-import { FHEToken, TestERC20 } from "../types";
+import { FHEToken, FHETokenBatcher, TestERC20 } from "../types";
 
 describe("FHEToken", function () {
   const TOKEN_URI = "ipfs://cwtt";
@@ -17,6 +17,8 @@ describe("FHEToken", function () {
   let underlying: TestERC20;
   let token: FHEToken;
   let tokenAddress: string;
+  let batcher: FHETokenBatcher;
+  let batcherAddress: string;
   const EIP712_RESOURCE = "demo-payment";
 
   before(async function () {
@@ -43,6 +45,9 @@ describe("FHEToken", function () {
     ])) as FHEToken;
 
     tokenAddress = await token.getAddress();
+
+    batcher = (await ethers.deployContract("FHETokenBatcher")) as FHETokenBatcher;
+    batcherAddress = await batcher.getAddress();
   });
 
   async function confidentialBalanceOrZero(address: string, signer: HardhatEthersSigner) {
@@ -216,5 +221,103 @@ describe("FHEToken", function () {
 
     expect(aliceBalanceAfter).to.equal(aliceBalanceBefore - TRANSFER_AMOUNT);
     expect(bobBalanceAfter).to.equal(bobBalanceBefore + TRANSFER_AMOUNT);
+  });
+
+  it("batches confidential transfers with partial success", async function () {
+    await underlying.connect(owner).approve(tokenAddress, WRAP_AMOUNT);
+    await token.wrap(alice.address, WRAP_AMOUNT);
+
+    const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+    const resourceHash = ethers.keccak256(ethers.toUtf8Bytes(EIP712_RESOURCE));
+
+    const encryptedTransferOk = await fhevm
+      .createEncryptedInput(tokenAddress, batcherAddress)
+      .add64(Number(TRANSFER_AMOUNT))
+      .encrypt();
+    const encryptedTransferBad = await fhevm
+      .createEncryptedInput(tokenAddress, batcherAddress)
+      .add64(Number(TRANSFER_AMOUNT))
+      .encrypt();
+
+    const paymentOk = {
+      holder: alice.address,
+      payee: bob.address,
+      maxClearAmount: TRANSFER_AMOUNT,
+      resourceHash,
+      validAfter: BigInt(now),
+      validBefore: BigInt(now + 3600),
+      nonce: ethers.hexlify(ethers.randomBytes(32)),
+      encryptedAmountHash: ethers.keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedTransferOk.handles[0]]),
+      ),
+    };
+
+    const paymentExpired = {
+      holder: alice.address,
+      payee: bob.address,
+      maxClearAmount: TRANSFER_AMOUNT,
+      resourceHash,
+      validAfter: BigInt(now - 10),
+      validBefore: BigInt(now - 1),
+      nonce: ethers.hexlify(ethers.randomBytes(32)),
+      encryptedAmountHash: ethers.keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedTransferBad.handles[0]]),
+      ),
+    };
+
+    const domain = {
+      name: await token.name(),
+      version: "1",
+      chainId: (await ethers.provider.getNetwork()).chainId,
+      verifyingContract: tokenAddress,
+    };
+
+    const types = {
+      ConfidentialPayment: [
+        { name: "holder", type: "address" },
+        { name: "payee", type: "address" },
+        { name: "maxClearAmount", type: "uint256" },
+        { name: "resourceHash", type: "bytes32" },
+        { name: "validAfter", type: "uint48" },
+        { name: "validBefore", type: "uint48" },
+        { name: "nonce", type: "bytes32" },
+        { name: "encryptedAmountHash", type: "bytes32" },
+      ],
+    };
+
+    const sigOk = await alice.signTypedData(domain, types, paymentOk);
+    const sigExpired = await alice.signTypedData(domain, types, paymentExpired);
+
+    const requests = [
+      {
+        p: paymentOk,
+        encryptedAmountInput: encryptedTransferOk.handles[0],
+        inputProof: encryptedTransferOk.inputProof,
+        sig: sigOk,
+      },
+      {
+        p: paymentExpired,
+        encryptedAmountInput: encryptedTransferBad.handles[0],
+        inputProof: encryptedTransferBad.inputProof,
+        sig: sigExpired,
+      },
+    ];
+
+    const [successes, handles] = await batcher
+      .getFunction("batchConfidentialTransferWithAuthorization")
+      .staticCall(tokenAddress, requests);
+
+    expect(successes[0]).to.equal(true);
+    expect(successes[1]).to.equal(false);
+    expect(handles[0]).to.not.equal(ethers.ZeroHash);
+    expect(handles[1]).to.equal(ethers.ZeroHash);
+
+    await batcher.batchConfidentialTransferWithAuthorization(tokenAddress, requests);
+
+    const aliceBalanceAfter = await confidentialBalanceOrZero(alice.address, alice);
+    const bobBalanceAfter = await confidentialBalanceOrZero(bob.address, bob);
+
+    expect(aliceBalanceAfter).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+    expect(bobBalanceAfter).to.equal(TRANSFER_AMOUNT);
   });
 });

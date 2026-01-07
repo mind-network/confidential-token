@@ -1,7 +1,7 @@
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import { deployments, ethers } from "hardhat";
 import { expect } from "chai";
-import { FHEToken, TestERC20 } from "../types";
+import { FHEToken, FHETokenBatcher, TestERC20 } from "../types";
 import { createInstance, SepoliaConfig } from "@zama-fhe/relayer-sdk/node";
 
 describe("FHEToken (Sepolia, real relayer)", function () {
@@ -9,8 +9,10 @@ describe("FHEToken (Sepolia, real relayer)", function () {
   let alice: HardhatEthersSigner;
   let bob: HardhatEthersSigner;
   let token: FHEToken;
+  let batcher: FHETokenBatcher;
   let underlying: TestERC20;
   let tokenAddress: string;
+  let batcherAddress: string;
   let relayerInstance: Awaited<ReturnType<typeof createInstance>>;
 
   const WRAP_AMOUNT = ethers.parseUnits("1000", 6);
@@ -108,10 +110,15 @@ describe("FHEToken (Sepolia, real relayer)", function () {
       tokenAddress = fh.address;
       token = (await ethers.getContractAt("FHEToken", fh.address)) as FHEToken;
 
+      const batch = await deployments.get("FHETokenBatcher");
+      batcherAddress = batch.address;
+      batcher = (await ethers.getContractAt("FHETokenBatcher", batch.address)) as FHETokenBatcher;
+
       const t20 = await deployments.get("TestERC20");
       underlying = (await ethers.getContractAt("TestERC20", t20.address)) as TestERC20;
     } catch (e) {
-      (e as Error).message += ". Deploy with `npx hardhat deploy --network sepolia --tags TestERC20,FHEToken`.";
+      (e as Error).message +=
+        ". Deploy with `npx hardhat deploy --network sepolia --tags TestERC20,FHEToken,FHETokenBatcher`.";
       throw e;
     }
   });
@@ -260,6 +267,112 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     expect(aliceAfter).to.equal(aliceBefore - TRANSFER_AMOUNT);
     expect(bobAfter).to.equal(bobBefore + TRANSFER_AMOUNT);
     expect(decryptedTransfer).to.equal(TRANSFER_AMOUNT);
+  });
+
+  it("batches confidential transfers with partial success on Sepolia", async function () {
+    this.timeout(6 * 60 * 1000);
+
+    progress("Approving wrapper for underlying (batch test)...");
+    await (await underlying.connect(owner).approve(tokenAddress, WRAP_AMOUNT)).wait();
+
+    progress("Wrapping to Alice...");
+    await (await token.connect(owner).wrap(alice.address, WRAP_AMOUNT)).wait();
+
+    const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+    const resourceHash = ethers.keccak256(ethers.toUtf8Bytes("sepolia-batch"));
+
+    progress("Creating encrypted inputs for batch...");
+    const encryptedOk = await relayerInstance
+      .createEncryptedInput(tokenAddress, batcherAddress)
+      .add64(Number(TRANSFER_AMOUNT))
+      .encrypt();
+    const encryptedBad = await relayerInstance
+      .createEncryptedInput(tokenAddress, batcherAddress)
+      .add64(Number(TRANSFER_AMOUNT))
+      .encrypt();
+
+    const paymentOk = {
+      holder: alice.address,
+      payee: bob.address,
+      maxClearAmount: TRANSFER_AMOUNT,
+      resourceHash,
+      validAfter: BigInt(now),
+      validBefore: BigInt(now + 3600),
+      nonce: ethers.hexlify(ethers.randomBytes(32)),
+      encryptedAmountHash: ethers.keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedOk.handles[0]]),
+      ),
+    };
+
+    const paymentExpired = {
+      holder: alice.address,
+      payee: bob.address,
+      maxClearAmount: TRANSFER_AMOUNT,
+      resourceHash,
+      validAfter: BigInt(now - 10),
+      validBefore: BigInt(now - 1),
+      nonce: ethers.hexlify(ethers.randomBytes(32)),
+      encryptedAmountHash: ethers.keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedBad.handles[0]]),
+      ),
+    };
+
+    const domain = {
+      name: await token.name(),
+      version: "1",
+      chainId: (await ethers.provider.getNetwork()).chainId,
+      verifyingContract: tokenAddress,
+    };
+
+    const types = {
+      ConfidentialPayment: [
+        { name: "holder", type: "address" },
+        { name: "payee", type: "address" },
+        { name: "maxClearAmount", type: "uint256" },
+        { name: "resourceHash", type: "bytes32" },
+        { name: "validAfter", type: "uint48" },
+        { name: "validBefore", type: "uint48" },
+        { name: "nonce", type: "bytes32" },
+        { name: "encryptedAmountHash", type: "bytes32" },
+      ],
+    };
+
+    const sigOk = await alice.signTypedData(domain, types, paymentOk);
+    const sigExpired = await alice.signTypedData(domain, types, paymentExpired);
+
+    const requests = [
+      {
+        p: paymentOk,
+        encryptedAmountInput: encryptedOk.handles[0],
+        inputProof: encryptedOk.inputProof,
+        sig: sigOk,
+      },
+      {
+        p: paymentExpired,
+        encryptedAmountInput: encryptedBad.handles[0],
+        inputProof: encryptedBad.inputProof,
+        sig: sigExpired,
+      },
+    ];
+
+    progress("Static call for batch status...");
+    const [successes, handles] = await batcher
+      .getFunction("batchConfidentialTransferWithAuthorization")
+      .staticCall(tokenAddress, requests);
+
+    expect(successes[0]).to.equal(true);
+    expect(successes[1]).to.equal(false);
+    expect(handles[0]).to.not.equal(ethers.ZeroHash);
+    expect(handles[1]).to.equal(ethers.ZeroHash);
+
+    progress("Relaying batch transaction...");
+    await (await batcher.connect(owner).batchConfidentialTransferWithAuthorization(tokenAddress, requests)).wait();
+
+    const aliceAfter = await confidentialBalanceOrZero(alice.address, alice);
+    const bobAfter = await confidentialBalanceOrZero(bob.address, bob);
+
+    expect(aliceAfter).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
+    expect(bobAfter).to.equal(TRANSFER_AMOUNT);
   });
 
   it("unwraps alice balance back to underlying on Sepolia", async function () {
