@@ -29,6 +29,88 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  async function buildDomain() {
+    return {
+      name: await token.name(),
+      version: "1",
+      chainId: (await ethers.provider.getNetwork()).chainId,
+      verifyingContract: tokenAddress,
+    };
+  }
+
+  async function approveAndWrapTo(recipient: string, amount: bigint, label: string) {
+    progress(`Approving wrapper for underlying (${label})...`);
+    await (await underlying.connect(owner).approve(tokenAddress, amount)).wait();
+
+    progress(`Wrapping to ${recipient}...`);
+    await (await token.connect(owner).wrap(recipient, amount)).wait();
+  }
+
+  async function encryptAmountForSender(amount: bigint, sender: string) {
+    return relayerInstance
+      .createEncryptedInput(tokenAddress, sender)
+      .add64(Number(amount))
+      .encrypt();
+  }
+
+  function buildConfidentialPayment(
+    holder: string,
+    payee: string,
+    amount: bigint,
+    resourceHash: string,
+    now: number,
+  ) {
+    return {
+      holder,
+      payee,
+      maxClearAmount: amount,
+      resourceHash,
+      validAfter: BigInt(now),
+      validBefore: BigInt(now + 3600),
+      nonce: ethers.hexlify(ethers.randomBytes(32)),
+    };
+  }
+
+  function buildUnwrapAuthorization(
+    holder: string,
+    to: string,
+    now: number,
+    encryptedAmountHash: string,
+  ) {
+    return {
+      holder,
+      to,
+      validAfter: BigInt(now),
+      validBefore: BigInt(now + 3600),
+      nonce: ethers.hexlify(ethers.randomBytes(32)),
+      encryptedAmountHash,
+    };
+  }
+
+  const CONFIDENTIAL_PAYMENT_TYPES = {
+    ConfidentialPayment: [
+      { name: "holder", type: "address" },
+      { name: "payee", type: "address" },
+      { name: "maxClearAmount", type: "uint256" },
+      { name: "resourceHash", type: "bytes32" },
+      { name: "validAfter", type: "uint48" },
+      { name: "validBefore", type: "uint48" },
+      { name: "nonce", type: "bytes32" },
+      { name: "encryptedAmountHash", type: "bytes32" },
+    ],
+  };
+
+  const UNWRAP_AUTHORIZATION_TYPES = {
+    UnwrapAuthorization: [
+      { name: "holder", type: "address" },
+      { name: "to", type: "address" },
+      { name: "validAfter", type: "uint48" },
+      { name: "validBefore", type: "uint48" },
+      { name: "nonce", type: "bytes32" },
+      { name: "encryptedAmountHash", type: "bytes32" },
+    ],
+  };
+
   async function userDecryptEuint64(handle: string, contractAddress: string, signer: HardhatEthersSigner) {
     const keypair = relayerInstance.generateKeypair();
     const startTimestamp = Math.floor(Date.now() / 1000).toString();
@@ -144,10 +226,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     expect(ownerBalanceAfterWrap - ownerBalanceBefore).to.equal(WRAP_AMOUNT);
 
     progress("Creating encrypted transfer input...");
-    const encryptedTransfer = await relayerInstance
-      .createEncryptedInput(tokenAddress, owner.address)
-      .add64(Number(TRANSFER_AMOUNT))
-      .encrypt();
+    const encryptedTransfer = await encryptAmountForSender(TRANSFER_AMOUNT, owner.address);
 
     progress(`Confidential transfer ${TRANSFER_AMOUNT} to alice...`);
     await (
@@ -173,20 +252,14 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     this.timeout(6 * 60 * 1000);
 
     progress("Approving wrapper for underlying (EIP-712 test)...");
-    await (await underlying.connect(owner).approve(tokenAddress, WRAP_AMOUNT)).wait();
-
-    progress("Wrapping to Alice...");
-    await (await token.connect(owner).wrap(alice.address, WRAP_AMOUNT)).wait();
+    await approveAndWrapTo(alice.address, WRAP_AMOUNT, "EIP-712 test");
 
     progress("Reading balances before...");
     const aliceBefore = await confidentialBalanceOrZero(alice.address, alice);
     const bobBefore = await confidentialBalanceOrZero(bob.address, bob);
 
     progress("Creating encrypted input (owner as sender)...");
-    const encryptedTransfer = await relayerInstance
-      .createEncryptedInput(tokenAddress, owner.address)
-      .add64(Number(TRANSFER_AMOUNT))
-      .encrypt();
+    const encryptedTransfer = await encryptAmountForSender(TRANSFER_AMOUNT, owner.address);
 
     const now = (await ethers.provider.getBlock("latest"))!.timestamp;
     const resourceHash = ethers.keccak256(ethers.toUtf8Bytes("sepolia-eip712"));
@@ -195,38 +268,14 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     );
 
     const payment = {
-      holder: alice.address,
-      payee: bob.address,
-      maxClearAmount: TRANSFER_AMOUNT,
-      resourceHash,
-      validAfter: BigInt(now),
-      validBefore: BigInt(now + 3600),
-      nonce: ethers.hexlify(ethers.randomBytes(32)),
+      ...buildConfidentialPayment(alice.address, bob.address, TRANSFER_AMOUNT, resourceHash, now),
       encryptedAmountHash,
     };
 
-    const domain = {
-      name: await token.name(),
-      version: "1",
-      chainId: (await ethers.provider.getNetwork()).chainId,
-      verifyingContract: tokenAddress,
-    };
-
-    const types = {
-      ConfidentialPayment: [
-        { name: "holder", type: "address" },
-        { name: "payee", type: "address" },
-        { name: "maxClearAmount", type: "uint256" },
-        { name: "resourceHash", type: "bytes32" },
-        { name: "validAfter", type: "uint48" },
-        { name: "validBefore", type: "uint48" },
-        { name: "nonce", type: "bytes32" },
-        { name: "encryptedAmountHash", type: "bytes32" },
-      ],
-    };
+    const domain = await buildDomain();
 
     progress("Alice signing typed data...");
-    const signature = await alice.signTypedData(domain, types, payment);
+    const signature = await alice.signTypedData(domain, CONFIDENTIAL_PAYMENT_TYPES, payment);
 
     progress("Owner relays confidentialTransferWithAuthorization...");
     const relayTx = await (
@@ -269,76 +318,102 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     expect(decryptedTransfer).to.equal(TRANSFER_AMOUNT);
   });
 
+  it("unwraps with EIP-712 authorization relayed by owner", async function () {
+    this.timeout(8 * 60 * 1000);
+
+    await approveAndWrapTo(alice.address, WRAP_AMOUNT, "unwrap auth test");
+
+    const aliceConfBefore = await confidentialBalanceOrZero(alice.address, alice);
+    const underlyingAliceBefore = await underlying.balanceOf(alice.address);
+
+    const now = (await ethers.provider.getBlock("latest"))!.timestamp;
+    await (await token.connect(alice).setOperator(owner.address, now + 3600)).wait();
+
+    progress("Creating encrypted unwrap input (owner as sender)...");
+    const encryptedUnwrap = await encryptAmountForSender(UNWRAP_AMOUNT, owner.address);
+
+    const unwrapAuth = buildUnwrapAuthorization(
+      alice.address,
+      alice.address,
+      now,
+      ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedUnwrap.handles[0]])),
+    );
+
+    const domain = await buildDomain();
+
+    progress("Alice signing unwrap typed data...");
+    const signature = await alice.signTypedData(domain, UNWRAP_AUTHORIZATION_TYPES, unwrapAuth);
+
+    progress("Owner relays unwrapWithAuthorization...");
+    const unwrapTx = await token
+      .connect(owner)
+      .unwrapWithAuthorization(
+        unwrapAuth,
+        encryptedUnwrap.handles[0],
+        encryptedUnwrap.inputProof,
+        signature,
+      );
+    const unwrapReceipt = await unwrapTx.wait();
+    if (!unwrapReceipt) {
+      throw new Error("unwrap authorization transaction did not produce a receipt");
+    }
+
+    const events = await token.queryFilter(
+      token.filters.UnwrapRequested(alice.address),
+      unwrapReceipt.blockNumber,
+      unwrapReceipt.blockNumber,
+    );
+    const unwrapHandle = events[0]?.args?.amount as string | undefined;
+    if (!unwrapHandle) {
+      throw new Error("UnwrapRequested event not found");
+    }
+
+    progress("Public decrypting unwrap amount...");
+    const { clearValues, decryptionProof } = await publicDecryptWithRetry([unwrapHandle]);
+    const clearAmount = clearValues[unwrapHandle] as bigint;
+
+    progress("Finalizing unwrap...");
+    await (await token.finalizeUnwrap(unwrapHandle, Number(clearAmount), decryptionProof)).wait();
+
+    const aliceConfAfter = await confidentialBalanceOrZero(alice.address, alice);
+    const underlyingAliceAfter = await underlying.balanceOf(alice.address);
+
+    expect(aliceConfAfter).to.equal(aliceConfBefore - clearAmount);
+    expect(underlyingAliceAfter - underlyingAliceBefore).to.equal(clearAmount);
+  });
+
   it("batches confidential transfers with partial success on Sepolia", async function () {
     this.timeout(6 * 60 * 1000);
 
-    progress("Approving wrapper for underlying (batch test)...");
-    await (await underlying.connect(owner).approve(tokenAddress, WRAP_AMOUNT)).wait();
-
-    progress("Wrapping to Alice...");
-    await (await token.connect(owner).wrap(alice.address, WRAP_AMOUNT)).wait();
+    await approveAndWrapTo(alice.address, WRAP_AMOUNT, "batch test");
 
     const now = (await ethers.provider.getBlock("latest"))!.timestamp;
     const resourceHash = ethers.keccak256(ethers.toUtf8Bytes("sepolia-batch"));
 
     progress("Creating encrypted inputs for batch...");
-    const encryptedOk = await relayerInstance
-      .createEncryptedInput(tokenAddress, batcherAddress)
-      .add64(Number(TRANSFER_AMOUNT))
-      .encrypt();
-    const encryptedBad = await relayerInstance
-      .createEncryptedInput(tokenAddress, batcherAddress)
-      .add64(Number(TRANSFER_AMOUNT))
-      .encrypt();
+    const encryptedOk = await encryptAmountForSender(TRANSFER_AMOUNT, batcherAddress);
+    const encryptedBad = await encryptAmountForSender(TRANSFER_AMOUNT, batcherAddress);
 
     const paymentOk = {
-      holder: alice.address,
-      payee: bob.address,
-      maxClearAmount: TRANSFER_AMOUNT,
-      resourceHash,
-      validAfter: BigInt(now),
-      validBefore: BigInt(now + 3600),
-      nonce: ethers.hexlify(ethers.randomBytes(32)),
+      ...buildConfidentialPayment(alice.address, bob.address, TRANSFER_AMOUNT, resourceHash, now),
       encryptedAmountHash: ethers.keccak256(
         ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedOk.handles[0]]),
       ),
     };
 
     const paymentExpired = {
-      holder: alice.address,
-      payee: bob.address,
-      maxClearAmount: TRANSFER_AMOUNT,
-      resourceHash,
+      ...buildConfidentialPayment(alice.address, bob.address, TRANSFER_AMOUNT, resourceHash, now),
       validAfter: BigInt(now - 10),
       validBefore: BigInt(now - 1),
-      nonce: ethers.hexlify(ethers.randomBytes(32)),
       encryptedAmountHash: ethers.keccak256(
         ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedBad.handles[0]]),
       ),
     };
 
-    const domain = {
-      name: await token.name(),
-      version: "1",
-      chainId: (await ethers.provider.getNetwork()).chainId,
-      verifyingContract: tokenAddress,
-    };
+    const domain = await buildDomain();
 
-    const types = {
-      ConfidentialPayment: [
-        { name: "holder", type: "address" },
-        { name: "payee", type: "address" },
-        { name: "maxClearAmount", type: "uint256" },
-        { name: "resourceHash", type: "bytes32" },
-        { name: "validAfter", type: "uint48" },
-        { name: "validBefore", type: "uint48" },
-        { name: "nonce", type: "bytes32" },
-        { name: "encryptedAmountHash", type: "bytes32" },
-      ],
-    };
-
-    const sigOk = await alice.signTypedData(domain, types, paymentOk);
-    const sigExpired = await alice.signTypedData(domain, types, paymentExpired);
+    const sigOk = await alice.signTypedData(domain, CONFIDENTIAL_PAYMENT_TYPES, paymentOk);
+    const sigExpired = await alice.signTypedData(domain, CONFIDENTIAL_PAYMENT_TYPES, paymentExpired);
 
     const requests = [
       {
