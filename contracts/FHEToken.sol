@@ -11,6 +11,7 @@ import {
     ERC7984ObserverAccess
 } from "@openzeppelin/confidential-contracts/token/ERC7984/extensions/ERC7984ObserverAccess.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
@@ -73,6 +74,7 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
 
     /// @dev Replay protection: each (holder, nonce) pair can be used only once
     mapping(address => mapping(bytes32 => bool)) public usedNonces;
+    mapping(euint64 unwrapAmount => address recipient) private _authUnwrapRequests;
 
     /// @dev Payment execution event (only emits the euint64 handle, not the plaintext amount)
     event ConfidentialPaymentExecuted(
@@ -199,7 +201,7 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
     /// @param inputProof           fhEVM input proof
     /// @param sig                  Holder’s EIP-712 signature over the typed data
     ///
-    /// @dev Note: the caller must be the holder or an approved operator, as required by unwrap.
+    /// @dev Note: this function bypasses operator checks; authorization is enforced by the signature.
     function unwrapWithAuthorization(
         UnwrapAuthorization calldata p,
         externalEuint64 encryptedAmountInput,
@@ -223,9 +225,40 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
         bytes32 digest = _hashTypedDataV4(_hashUnwrap(p));
         require(ECDSA.recover(digest, sig) == p.holder, "X402: invalid signature");
 
-        unwrap(p.holder, p.to, encryptedAmountInput, inputProof);
+        euint64 amount = FHE.fromExternal(encryptedAmountInput, inputProof);
+        euint64 burntAmount = _burn(p.holder, amount);
+        FHE.makePubliclyDecryptable(burntAmount);
 
-        emit UnwrapWithAuthorizationExecuted(p.holder, p.to, p.nonce, externalEuint64.unwrap(encryptedAmountInput));
+        assert(_authUnwrapRequests[burntAmount] == address(0));
+        _authUnwrapRequests[burntAmount] = p.to;
+
+        emit UnwrapRequested(p.to, burntAmount);
+
+        emit UnwrapWithAuthorizationExecuted(p.holder, p.to, p.nonce, euint64.unwrap(burntAmount));
+    }
+
+    function finalizeUnwrap(
+        euint64 burntAmount,
+        uint64 burntAmountCleartext,
+        bytes calldata decryptionProof
+    ) public override {
+        address to = _authUnwrapRequests[burntAmount];
+        if (to == address(0)) {
+            super.finalizeUnwrap(burntAmount, burntAmountCleartext, decryptionProof);
+            return;
+        }
+        delete _authUnwrapRequests[burntAmount];
+
+        bytes32[] memory handles = new bytes32[](1);
+        handles[0] = euint64.unwrap(burntAmount);
+
+        bytes memory cleartexts = abi.encode(burntAmountCleartext);
+
+        FHE.checkSignatures(handles, cleartexts, decryptionProof);
+
+        SafeERC20.safeTransfer(underlying(), to, burntAmountCleartext * rate());
+
+        emit UnwrapFinalized(to, burntAmount, burntAmountCleartext);
     }
 
     function decimals() public view override(ERC7984, ERC7984ERC20Wrapper) returns (uint8) {

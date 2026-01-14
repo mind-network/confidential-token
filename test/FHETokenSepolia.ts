@@ -46,9 +46,9 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     await (await token.connect(owner).wrap(recipient, amount)).wait();
   }
 
-  async function encryptAmountForSender(amount: bigint, sender: string) {
+  async function encryptAmountForCaller(amount: bigint, caller: string) {
     return relayerInstance
-      .createEncryptedInput(tokenAddress, sender)
+      .createEncryptedInput(tokenAddress, caller)
       .add64(Number(amount))
       .encrypt();
   }
@@ -226,7 +226,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     expect(ownerBalanceAfterWrap - ownerBalanceBefore).to.equal(WRAP_AMOUNT);
 
     progress("Creating encrypted transfer input...");
-    const encryptedTransfer = await encryptAmountForSender(TRANSFER_AMOUNT, owner.address);
+    const encryptedTransfer = await encryptAmountForCaller(TRANSFER_AMOUNT, owner.address);
 
     progress(`Confidential transfer ${TRANSFER_AMOUNT} to alice...`);
     await (
@@ -248,7 +248,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     expect(aliceBalanceAfter).to.equal(aliceBalanceBefore + TRANSFER_AMOUNT);
   });
 
-  it("executes confidential transfer via EIP-712 authorization relayed by owner", async function () {
+  it("executes confidential transfer via EIP-712 authorization relayed by bob", async function () {
     this.timeout(6 * 60 * 1000);
 
     progress("Approving wrapper for underlying (EIP-712 test)...");
@@ -258,8 +258,8 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     const aliceBefore = await confidentialBalanceOrZero(alice.address, alice);
     const bobBefore = await confidentialBalanceOrZero(bob.address, bob);
 
-    progress("Creating encrypted input (owner as sender)...");
-    const encryptedTransfer = await encryptAmountForSender(TRANSFER_AMOUNT, owner.address);
+    progress("Creating encrypted input (bob as sender)...");
+    const encryptedTransfer = await encryptAmountForCaller(TRANSFER_AMOUNT, bob.address);
 
     const now = (await ethers.provider.getBlock("latest"))!.timestamp;
     const resourceHash = ethers.keccak256(ethers.toUtf8Bytes("sepolia-eip712"));
@@ -277,10 +277,10 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     progress("Alice signing typed data...");
     const signature = await alice.signTypedData(domain, CONFIDENTIAL_PAYMENT_TYPES, payment);
 
-    progress("Owner relays confidentialTransferWithAuthorization...");
+    progress("Bob relays confidentialTransferWithAuthorization...");
     const relayTx = await (
       await token
-        .connect(owner)
+        .connect(bob)
         .confidentialTransferWithAuthorization(
           payment,
           encryptedTransfer.handles[0],
@@ -318,35 +318,34 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     expect(decryptedTransfer).to.equal(TRANSFER_AMOUNT);
   });
 
-  it("unwraps with EIP-712 authorization relayed by owner", async function () {
+  it("unwraps with EIP-712 authorization relayed by bob", async function () {
     this.timeout(8 * 60 * 1000);
 
-    await approveAndWrapTo(alice.address, WRAP_AMOUNT, "unwrap auth test");
+    await approveAndWrapTo(owner.address, WRAP_AMOUNT, "unwrap auth test");
 
-    const aliceConfBefore = await confidentialBalanceOrZero(alice.address, alice);
-    const underlyingAliceBefore = await underlying.balanceOf(alice.address);
+    const ownerConfBefore = await confidentialBalanceOrZero(owner.address, owner);
+    const underlyingOwnerBefore = await underlying.balanceOf(owner.address);
 
     const now = (await ethers.provider.getBlock("latest"))!.timestamp;
-    await (await token.connect(alice).setOperator(owner.address, now + 3600)).wait();
 
-    progress("Creating encrypted unwrap input (owner as sender)...");
-    const encryptedUnwrap = await encryptAmountForSender(UNWRAP_AMOUNT, owner.address);
+    progress("Creating encrypted unwrap input (bob as sender)...");
+    const encryptedUnwrap = await encryptAmountForCaller(UNWRAP_AMOUNT, bob.address);
 
     const unwrapAuth = buildUnwrapAuthorization(
-      alice.address,
-      alice.address,
+      owner.address,
+      owner.address,
       now,
       ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedUnwrap.handles[0]])),
     );
 
     const domain = await buildDomain();
 
-    progress("Alice signing unwrap typed data...");
-    const signature = await alice.signTypedData(domain, UNWRAP_AUTHORIZATION_TYPES, unwrapAuth);
+    progress("Owner signing unwrap typed data...");
+    const signature = await owner.signTypedData(domain, UNWRAP_AUTHORIZATION_TYPES, unwrapAuth);
 
-    progress("Owner relays unwrapWithAuthorization...");
+    progress("Bob relays unwrapWithAuthorization...");
     const unwrapTx = await token
-      .connect(owner)
+      .connect(bob)
       .unwrapWithAuthorization(
         unwrapAuth,
         encryptedUnwrap.handles[0],
@@ -359,7 +358,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     }
 
     const events = await token.queryFilter(
-      token.filters.UnwrapRequested(alice.address),
+      token.filters.UnwrapRequested(owner.address),
       unwrapReceipt.blockNumber,
       unwrapReceipt.blockNumber,
     );
@@ -375,11 +374,11 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     progress("Finalizing unwrap...");
     await (await token.finalizeUnwrap(unwrapHandle, Number(clearAmount), decryptionProof)).wait();
 
-    const aliceConfAfter = await confidentialBalanceOrZero(alice.address, alice);
-    const underlyingAliceAfter = await underlying.balanceOf(alice.address);
+    const ownerConfAfter = await confidentialBalanceOrZero(owner.address, owner);
+    const underlyingOwnerAfter = await underlying.balanceOf(owner.address);
 
-    expect(aliceConfAfter).to.equal(aliceConfBefore - clearAmount);
-    expect(underlyingAliceAfter - underlyingAliceBefore).to.equal(clearAmount);
+    expect(ownerConfAfter).to.equal(ownerConfBefore - clearAmount);
+    expect(underlyingOwnerAfter - underlyingOwnerBefore).to.equal(clearAmount);
   });
 
   it("batches confidential transfers with partial success on Sepolia", async function () {
@@ -391,8 +390,8 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     const resourceHash = ethers.keccak256(ethers.toUtf8Bytes("sepolia-batch"));
 
     progress("Creating encrypted inputs for batch...");
-    const encryptedOk = await encryptAmountForSender(TRANSFER_AMOUNT, batcherAddress);
-    const encryptedBad = await encryptAmountForSender(TRANSFER_AMOUNT, batcherAddress);
+    const encryptedOk = await encryptAmountForCaller(TRANSFER_AMOUNT, batcherAddress);
+    const encryptedBad = await encryptAmountForCaller(TRANSFER_AMOUNT, batcherAddress);
 
     const paymentOk = {
       ...buildConfidentialPayment(alice.address, bob.address, TRANSFER_AMOUNT, resourceHash, now),
@@ -441,7 +440,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     expect(handles[1]).to.equal(ethers.ZeroHash);
 
     progress("Relaying batch transaction...");
-    await (await batcher.connect(owner).batchConfidentialTransferWithAuthorization(tokenAddress, requests)).wait();
+    await (await batcher.connect(bob).batchConfidentialTransferWithAuthorization(tokenAddress, requests)).wait();
 
     const aliceAfter = await confidentialBalanceOrZero(alice.address, alice);
     const bobAfter = await confidentialBalanceOrZero(bob.address, bob);
@@ -450,7 +449,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     expect(bobAfter).to.equal(TRANSFER_AMOUNT);
   });
 
-  it("unwraps alice balance back to underlying on Sepolia", async function () {
+  it("unwraps owner balance back to underlying on Sepolia", async function () {
     this.timeout(8 * 60 * 1000);
 
     progress("Approving wrapper for underlying (unwrap test)...");
@@ -458,42 +457,27 @@ describe("FHEToken (Sepolia, real relayer)", function () {
 
     progress("Reading starting balances...");
     const ownerConfBefore = await confidentialBalanceOrZero(owner.address, owner);
-    const aliceConfBefore = await confidentialBalanceOrZero(alice.address, alice);
     const underlyingOwnerBefore = await underlying.balanceOf(owner.address);
-    const underlyingAliceBefore = await underlying.balanceOf(alice.address);
     const underlyingTokenBefore = await underlying.balanceOf(tokenAddress);
 
     progress("Wrapping for unwrap test...");
     await (await token.connect(owner).wrap(owner.address, WRAP_AMOUNT)).wait();
 
-    progress("Transferring to alice for unwrap...");
-    const encryptedTransfer = await relayerInstance
-      .createEncryptedInput(tokenAddress, owner.address)
-      .add64(Number(TRANSFER_AMOUNT))
-      .encrypt();
-    await (
-      await token
-        .connect(owner)
-        [
-          "confidentialTransfer(address,bytes32,bytes)"
-        ](alice.address, encryptedTransfer.handles[0], encryptedTransfer.inputProof)
-    ).wait();
+    const ownerConfMid = await confidentialBalanceOrZero(owner.address, owner);
+    expect(ownerConfMid).to.be.greaterThanOrEqual(UNWRAP_AMOUNT);
 
-    const aliceConfMid = await confidentialBalanceOrZero(alice.address, alice);
-    expect(aliceConfMid).to.be.greaterThanOrEqual(UNWRAP_AMOUNT);
-
-    progress("Creating unwrap encrypted amount for alice...");
+    progress("Creating unwrap encrypted amount for owner...");
     const encryptedUnwrap = await relayerInstance
-      .createEncryptedInput(tokenAddress, alice.address)
+      .createEncryptedInput(tokenAddress, owner.address)
       .add64(Number(UNWRAP_AMOUNT))
       .encrypt();
 
     progress("Calling unwrap...");
     const unwrapTx = await token
-      .connect(alice)
+      .connect(owner)
       [
         "unwrap(address,address,bytes32,bytes)"
-      ](alice.address, alice.address, encryptedUnwrap.handles[0], encryptedUnwrap.inputProof);
+      ](owner.address, owner.address, encryptedUnwrap.handles[0], encryptedUnwrap.inputProof);
     const unwrapReceipt = await unwrapTx.wait();
     if (!unwrapReceipt) {
       throw new Error("unwrap transaction did not produce a receipt");
@@ -501,7 +485,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     console.log("unwrap tx hash:", unwrapReceipt.hash);
 
     const events = await token.queryFilter(
-      token.filters.UnwrapRequested(alice.address),
+      token.filters.UnwrapRequested(owner.address),
       unwrapReceipt.blockNumber,
       unwrapReceipt.blockNumber,
     );
@@ -521,15 +505,15 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     console.log("Waiting for 1 min for unwrap finalize tx to be synced between nodes...");
     await sleep(60 * 1000);
 
-    const aliceConfAfter = await confidentialBalanceOrZero(alice.address, alice);
-    const underlyingAliceAfter = await underlying.balanceOf(alice.address);
+    const ownerConfAfter = await confidentialBalanceOrZero(owner.address, owner);
+    const underlyingOwnerAfter = await underlying.balanceOf(owner.address);
     const underlyingTokenAfter = await underlying.balanceOf(tokenAddress);
 
-    expect(aliceConfAfter).to.equal(aliceConfMid - clearAmount);
-    expect(underlyingAliceAfter - underlyingAliceBefore).to.equal(clearAmount);
+    expect(ownerConfAfter).to.equal(ownerConfMid - clearAmount);
+    expect(underlyingOwnerAfter - underlyingOwnerBefore).to.equal(clearAmount);
     const underlyingDelta = underlyingTokenAfter - underlyingTokenBefore;
     expect(underlyingDelta).to.equal(WRAP_AMOUNT - clearAmount);
-    const ownerConfAfter = await confidentialBalanceOrZero(owner.address, owner);
-    expect(ownerConfAfter).to.equal(ownerConfBefore + WRAP_AMOUNT - TRANSFER_AMOUNT);
+    const ownerConfAfterFinal = await confidentialBalanceOrZero(owner.address, owner);
+    expect(ownerConfAfterFinal).to.equal(ownerConfBefore + WRAP_AMOUNT - clearAmount);
   });
 });
