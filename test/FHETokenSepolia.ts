@@ -324,7 +324,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     await approveAndWrapTo(owner.address, WRAP_AMOUNT, "unwrap auth test");
 
     const ownerConfBefore = await confidentialBalanceOrZero(owner.address, owner);
-    const underlyingOwnerBefore = await underlying.balanceOf(owner.address);
+    const underlyingBobBefore = await underlying.balanceOf(bob.address);
 
     const now = (await ethers.provider.getBlock("latest"))!.timestamp;
 
@@ -333,7 +333,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
 
     const unwrapAuth = buildUnwrapAuthorization(
       owner.address,
-      owner.address,
+      bob.address,
       now,
       ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [encryptedUnwrap.handles[0]])),
     );
@@ -358,7 +358,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     }
 
     const events = await token.queryFilter(
-      token.filters.UnwrapRequested(owner.address),
+      token.filters.UnwrapRequested(bob.address),
       unwrapReceipt.blockNumber,
       unwrapReceipt.blockNumber,
     );
@@ -375,10 +375,10 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     await (await token.finalizeUnwrap(unwrapHandle, Number(clearAmount), decryptionProof)).wait();
 
     const ownerConfAfter = await confidentialBalanceOrZero(owner.address, owner);
-    const underlyingOwnerAfter = await underlying.balanceOf(owner.address);
+    const underlyingBobAfter = await underlying.balanceOf(bob.address);
 
     expect(ownerConfAfter).to.equal(ownerConfBefore - clearAmount);
-    expect(underlyingOwnerAfter - underlyingOwnerBefore).to.equal(clearAmount);
+    expect(underlyingBobAfter).to.equal(underlyingBobBefore + clearAmount);
   });
 
   it("batches confidential transfers with partial success on Sepolia", async function () {
