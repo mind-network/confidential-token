@@ -47,19 +47,10 @@ describe("FHEToken (Sepolia, real relayer)", function () {
   }
 
   async function encryptAmountForCaller(amount: bigint, caller: string) {
-    return relayerInstance
-      .createEncryptedInput(tokenAddress, caller)
-      .add64(Number(amount))
-      .encrypt();
+    return relayerInstance.createEncryptedInput(tokenAddress, caller).add64(Number(amount)).encrypt();
   }
 
-  function buildConfidentialPayment(
-    holder: string,
-    payee: string,
-    amount: bigint,
-    resourceHash: string,
-    now: number,
-  ) {
+  function buildConfidentialPayment(holder: string, payee: string, amount: bigint, resourceHash: string, now: number) {
     return {
       holder,
       payee,
@@ -71,12 +62,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     };
   }
 
-  function buildUnwrapAuthorization(
-    holder: string,
-    to: string,
-    now: number,
-    encryptedAmountHash: string,
-  ) {
+  function buildUnwrapAuthorization(holder: string, to: string, now: number, encryptedAmountHash: string) {
     return {
       holder,
       to,
@@ -346,12 +332,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     progress("Bob relays unwrapWithAuthorization...");
     const unwrapTx = await token
       .connect(bob)
-      .unwrapWithAuthorization(
-        unwrapAuth,
-        encryptedUnwrap.handles[0],
-        encryptedUnwrap.inputProof,
-        signature,
-      );
+      .unwrapWithAuthorization(unwrapAuth, encryptedUnwrap.handles[0], encryptedUnwrap.inputProof, signature);
     const unwrapReceipt = await unwrapTx.wait();
     if (!unwrapReceipt) {
       throw new Error("unwrap authorization transaction did not produce a receipt");
@@ -367,6 +348,8 @@ describe("FHEToken (Sepolia, real relayer)", function () {
       throw new Error("UnwrapRequested event not found");
     }
 
+    progress("Waiting before public decrypt...");
+    await sleep(30 * 1000);
     progress("Public decrypting unwrap amount...");
     const { clearValues, decryptionProof } = await publicDecryptWithRetry([unwrapHandle]);
     const clearAmount = clearValues[unwrapHandle] as bigint;
@@ -385,6 +368,8 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     this.timeout(6 * 60 * 1000);
 
     await approveAndWrapTo(alice.address, WRAP_AMOUNT, "batch test");
+    const aliceBefore = await confidentialBalanceOrZero(alice.address, alice);
+    const bobBefore = await confidentialBalanceOrZero(bob.address, bob);
 
     const now = (await ethers.provider.getBlock("latest"))!.timestamp;
     const resourceHash = ethers.keccak256(ethers.toUtf8Bytes("sepolia-batch"));
@@ -445,8 +430,8 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     const aliceAfter = await confidentialBalanceOrZero(alice.address, alice);
     const bobAfter = await confidentialBalanceOrZero(bob.address, bob);
 
-    expect(aliceAfter).to.equal(WRAP_AMOUNT - TRANSFER_AMOUNT);
-    expect(bobAfter).to.equal(TRANSFER_AMOUNT);
+    expect(aliceAfter - aliceBefore).to.equal(0n - TRANSFER_AMOUNT);
+    expect(bobAfter - bobBefore).to.equal(TRANSFER_AMOUNT);
   });
 
   it("unwraps owner balance back to underlying on Sepolia", async function () {
@@ -494,6 +479,8 @@ describe("FHEToken (Sepolia, real relayer)", function () {
       throw new Error("UnwrapRequested event not found");
     }
 
+    progress("Waiting before public decrypt...");
+    await sleep(30 * 1000);
     progress("Public decrypting unwrap amount...");
     const { clearValues, decryptionProof } = await publicDecryptWithRetry([unwrapHandle]);
     const clearAmount = clearValues[unwrapHandle] as bigint;
@@ -510,7 +497,7 @@ describe("FHEToken (Sepolia, real relayer)", function () {
     const underlyingTokenAfter = await underlying.balanceOf(tokenAddress);
 
     expect(ownerConfAfter).to.equal(ownerConfMid - clearAmount);
-    expect(underlyingOwnerAfter - underlyingOwnerBefore).to.equal(clearAmount);
+    expect(underlyingOwnerAfter - underlyingOwnerBefore).to.equal(0n - WRAP_AMOUNT + clearAmount);
     const underlyingDelta = underlyingTokenAfter - underlyingTokenBefore;
     expect(underlyingDelta).to.equal(WRAP_AMOUNT - clearAmount);
     const ownerConfAfterFinal = await confidentialBalanceOrZero(owner.address, owner);
