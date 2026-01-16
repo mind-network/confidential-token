@@ -18,6 +18,15 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrapper, EIP712 {
     using ECDSA for bytes32;
 
+    error NonceAlreadyUsed();
+    error InvalidHolder();
+    error InvalidPayee();
+    error InvalidRecipient();
+    error NotYetValid();
+    error AuthorizationExpired();
+    error EncryptedAmountMismatch();
+    error InvalidSignature();
+
     // ====== EIP-712 Typed Data ======
 
     /// @dev Payment authorization struct
@@ -136,7 +145,7 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
 
     function _useNonce(address holder, bytes32 nonce) internal {
         if (usedNonces[holder][nonce]) {
-            revert("X402: nonce already used");
+            revert NonceAlreadyUsed();
         }
         usedNonces[holder][nonce] = true;
     }
@@ -165,24 +174,36 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
     ) external returns (euint64 transferred) {
         // --- Basic checks ---
 
-        require(p.holder != address(0), "X402: invalid holder");
-        require(p.payee != address(0), "X402: invalid payee");
+        if (p.holder == address(0)) {
+            revert InvalidHolder();
+        }
+        if (p.payee == address(0)) {
+            revert InvalidPayee();
+        }
 
         // Validity window
         uint48 blockTs = uint48(block.timestamp);
-        require(blockTs >= p.validAfter, "X402: not yet valid");
-        require(blockTs <= p.validBefore, "X402: authorization expired");
+        if (blockTs < p.validAfter) {
+            revert NotYetValid();
+        }
+        if (blockTs > p.validBefore) {
+            revert AuthorizationExpired();
+        }
 
         // Nonce replay protection
         _useNonce(p.holder, p.nonce);
 
         // Bind the encrypted amount handle to prevent ciphertext substitution
-        require(keccak256(abi.encode(encryptedAmountInput)) == p.encryptedAmountHash, "X402: encryptedAmount mismatch");
+        if (keccak256(abi.encode(encryptedAmountInput)) != p.encryptedAmountHash) {
+            revert EncryptedAmountMismatch();
+        }
 
         // --- Recover signature ---
 
         bytes32 digest = _hashTypedDataV4(_hashPayment(p));
-        require(ECDSA.recover(digest, sig) == p.holder, "X402: invalid signature");
+        if (ECDSA.recover(digest, sig) != p.holder) {
+            revert InvalidSignature();
+        }
 
         // --- Confidential transfer ---
 
@@ -208,19 +229,31 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
         bytes calldata inputProof,
         bytes calldata sig
     ) external {
-        require(p.holder != address(0), "X402: invalid holder");
-        require(p.to != address(0), "X402: invalid recipient");
+        if (p.holder == address(0)) {
+            revert InvalidHolder();
+        }
+        if (p.to == address(0)) {
+            revert InvalidRecipient();
+        }
 
         uint48 blockTs = uint48(block.timestamp);
-        require(blockTs >= p.validAfter, "X402: not yet valid");
-        require(blockTs <= p.validBefore, "X402: authorization expired");
+        if (blockTs < p.validAfter) {
+            revert NotYetValid();
+        }
+        if (blockTs > p.validBefore) {
+            revert AuthorizationExpired();
+        }
 
         _useNonce(p.holder, p.nonce);
 
-        require(keccak256(abi.encode(encryptedAmountInput)) == p.encryptedAmountHash, "X402: encryptedAmount mismatch");
+        if (keccak256(abi.encode(encryptedAmountInput)) != p.encryptedAmountHash) {
+            revert EncryptedAmountMismatch();
+        }
 
         bytes32 digest = _hashTypedDataV4(_hashUnwrap(p));
-        require(ECDSA.recover(digest, sig) == p.holder, "X402: invalid signature");
+        if (ECDSA.recover(digest, sig) != p.holder) {
+            revert InvalidSignature();
+        }
 
         euint64 amount = FHE.fromExternal(encryptedAmountInput, inputProof);
         euint64 burntAmount = _burn(p.holder, amount);
