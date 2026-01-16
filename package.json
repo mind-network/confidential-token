@@ -24,12 +24,14 @@
     "hardhat"
   ],
   "dependencies": {
-    "@fhevm/solidity": "^0.9.1",
-    "@openzeppelin/confidential-contracts": "^0.3.0",
+    "@fhevm/solidity": "^0.10.0",
+    "@openzeppelin/confidential-contracts": "^0.3.1",
+    "@openzeppelin/contracts": "^5.4.0",
     "encrypted-types": "^0.0.4"
   },
   "devDependencies": {
-    "@fhevm/hardhat-plugin": "^0.3.0-3",
+    "@fhevm/hardhat-plugin": "^0.4.0-0",
+    "@fhevm/mock-utils": "^0.4.0-0",
     "@nomicfoundation/hardhat-chai-matchers": "^2.1.0",
     "@nomicfoundation/hardhat-ethers": "^3.1.0",
     "@nomicfoundation/hardhat-network-helpers": "^1.1.0",
@@ -41,7 +43,7 @@
     "@types/node": "^20.19.8",
     "@typescript-eslint/eslint-plugin": "^8.37.0",
     "@typescript-eslint/parser": "^8.37.0",
-    "@zama-fhe/relayer-sdk": "^0.3.0-6",
+    "@zama-fhe/relayer-sdk": "^0.4.0-4",
     "chai": "^4.5.0",
     "chai-as-promised": "^8.0.1",
     "cross-env": "^7.0.3",
@@ -49,7 +51,7 @@
     "eslint-config-prettier": "^9.1.0",
     "ethers": "^6.15.0",
     "hardhat": "^2.26.0",
-    "hardhat-deploy": "^0.11.45",
+    "hardhat-deploy": "^1.0.4",
     "hardhat-gas-reporter": "^2.3.0",
     "mocha": "^11.7.1",
     "prettier": "^3.6.2",

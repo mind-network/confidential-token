@@ -96,9 +96,9 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
     constructor(
         string memory name_,
         string memory symbol_,
-        string memory tokenURI_,
+        string memory contractURI_,
         IERC20 underlying_
-    ) ERC7984(name_, symbol_, tokenURI_) ERC7984ERC20Wrapper(underlying_) EIP712(name_, "1") {}
+    ) ERC7984(name_, symbol_, contractURI_) ERC7984ERC20Wrapper(underlying_) EIP712(name_, "1") {}
 
     // ====== EIP-712 hash helpers ======
 
@@ -217,10 +217,7 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
 
         _useNonce(p.holder, p.nonce);
 
-        require(
-            keccak256(abi.encode(encryptedAmountInput)) == p.encryptedAmountHash,
-            "X402: encryptedAmount mismatch"
-        );
+        require(keccak256(abi.encode(encryptedAmountInput)) == p.encryptedAmountHash, "X402: encryptedAmount mismatch");
 
         bytes32 digest = _hashTypedDataV4(_hashUnwrap(p));
         require(ECDSA.recover(digest, sig) == p.holder, "X402: invalid signature");
@@ -269,7 +266,7 @@ contract FHEToken is ZamaEthereumConfig, ERC7984ObserverAccess, ERC7984ERC20Wrap
         address from,
         address to,
         euint64 amount
-    ) internal override(ERC7984, ERC7984ObserverAccess) returns (euint64 transferred) {
+    ) internal override(ERC7984ObserverAccess, ERC7984ERC20Wrapper) returns (euint64 transferred) {
         return ERC7984ObserverAccess._update(from, to, amount);
     }
 }
