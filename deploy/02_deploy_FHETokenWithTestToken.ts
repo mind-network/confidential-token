@@ -5,9 +5,9 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { deployer } = await hre.getNamedAccounts();
   const { deploy, get, log } = hre.deployments;
 
-  const name = process.env.FHETOKEN_TESTNET_NAME ?? "Confidential Token (Testnet)";
-  const symbol = process.env.FHETOKEN_TESTNET_SYMBOL ?? "CTKN";
-  const tokenURI = process.env.FHETOKEN_TESTNET_URI ?? "ipfs://cwtt";
+  const name = process.env.FHETOKEN_NAME ?? "Confidential Token";
+  const symbol = process.env.FHETOKEN_SYMBOL ?? "CTKN";
+  const tokenURI = process.env.FHETOKEN_URI ?? "ipfs://cwtt";
 
   const underlying = await get("TestERC20");
 
@@ -17,10 +17,10 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     log: true,
   });
 
-  log(`FHEToken (testnet) deployed at ${deployed.address} (underlying ${underlying.address})`);
+  log(`FHEToken deployed at ${deployed.address} (underlying ${underlying.address})`);
 };
 
 export default func;
-func.id = "deploy_fhe_token_testnet";
-func.tags = ["FHETokenTestnet"];
+func.id = "deploy_fhe_token_with_test_token";
+func.tags = ["FHETokenWithTestToken"];
 func.dependencies = ["TestERC20"];
